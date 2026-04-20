@@ -1,0 +1,67 @@
+name: Build Windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+
+  build-windows:
+
+    runs-on: windows-2019
+
+    steps:
+
+    - name: Git Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Prepare MSVC
+      uses: bus1/cabuild/action/msdevshell@v1
+      with:
+        architecture: x86
+
+    - name: Upgrade project files to latest Visual Studio, ignoring upgrade errors, and build
+      run: |
+        devenv abcspace.dsw /upgrade
+        # Fix the upgraded vcxproj files to use C++17
+        if (Test-Path abclib.vcxproj) {
+            $content = Get-Content abclib.vcxproj -Raw
+            if ($content -match '<LanguageStandard>') {
+                $content = $content -replace '<LanguageStandard>Default</LanguageStandard>', '<LanguageStandard>stdcpp17</LanguageStandard>'
+            } else {
+                # Add LanguageStandard if it doesn't exist
+                $content = $content -replace '(<ClCompile>)', '$1<LanguageStandard>stdcpp17</LanguageStandard>'
+            }
+            Set-Content abclib.vcxproj -NoNewline $content
+        }
+        if (Test-Path abcexe.vcxproj) {
+            $content = Get-Content abcexe.vcxproj -Raw
+            if ($content -match '<LanguageStandard>') {
+                $content = $content -replace '<LanguageStandard>Default</LanguageStandard>', '<LanguageStandard>stdcpp17</LanguageStandard>'
+            } else {
+                # Add LanguageStandard if it doesn't exist
+                $content = $content -replace '(<ClCompile>)', '$1<LanguageStandard>stdcpp17</LanguageStandard>'
+            }
+            Set-Content abcexe.vcxproj -NoNewline $content
+        }
+        msbuild abcspace.sln /m /nologo /v:m /p:Configuration=Release /p:UseMultiToolTask=true /p:PlatformToolset=v142 /p:PreprocessorDefinitions="_WINSOCKAPI_"
+        if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
+
+    - name: Test Executable
+      run: |
+        copy lib\x86\pthreadVC2.dll _TEST\
+        .\_TEST\abc.exe -c "r i10.aig; b; ps; b; rw -l; rw -lz; b; rw -lz; b; ps; cec"
+        if ($LASTEXITCODE -ne 0) { throw "Test failed with exit code $LASTEXITCODE" }
+
+    - name: Stage Executable
+      run: |
+        mkdir staging
+        copy _TEST\abc.exe staging\
+
+    - name: Upload package artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: package-windows
+        path: staging/
