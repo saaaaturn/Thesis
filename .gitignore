@@ -1,0 +1,56 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# -----------------------------
+# C/C++ / CMake build artifacts
+# -----------------------------
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.obj
+*.a
+*.out
+*.d
+
+# -----------------------------
+# Project-generated outputs
+# -----------------------------
+3_outputs/
+logs/
+models/
+
+# Runtime/generated folders under 2_process
+2_process/runtime_circuits/
+2_process/runtime_gcn/
+2_process/runtime_states/
+2_process/matrix/
+2_process/GCN_results/
+matrix/
+1_inputs/map_trans/
+
+# -----------------------------
+# Local shell history / local tools
+# -----------------------------
+abc.history
+
+# Large local installers
+Miniconda3-*.sh

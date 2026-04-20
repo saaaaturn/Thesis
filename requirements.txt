@@ -1,0 +1,13 @@
+# Core numerical and ML stack
+numpy>=1.26,<3
+torch>=2.2
+
+# RL environment + algorithm
+gymnasium>=0.29,<1.0
+stable-baselines3>=2.3,<3
+
+# Monitoring
+tensorboard>=2.16,<3
+
+# Optional utilities commonly used during development
+matplotlib>=3.8

@@ -1,0 +1,166 @@
+NOTE KHI CHAY SCRIPT
+
+Quy uoc nhanh:
+- Single mode: dung --circuit-file, KHONG can --circuit-pool.
+- Multiple mode: dung --circuit-file + --circuit-pool.
+- Reward moi theo LUT6/Level: uu tien --step-penalty 0.0.
+
+1) TRAINING TU DAU
+
+Single mode:
+python train_hybridsyn_ppo.py \
+	--mode single \
+	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+	--sequence-steps 25 \
+	--total-actions 30000 \
+	--ppo-steps 300 \
+	--batch-size 60 \
+	--learning-rate 0.0008 \
+	--gamma 0.99 \
+	--gae-lambda 0.95 \
+	--clip-range 0.2 \
+	--ent-coef 0.005 \
+	--vf-coef 0.5 \
+	--seed 42 \
+	--device auto \
+	--reward-alpha 1.0 \
+	--reward-beta 0.0 \
+	--step-penalty 0.0005 \
+	--reward-scale 20.0 \
+	--reward-clip 10.0 \
+	--log-file-name train_single_lutlevel.log \
+	--eval-freq 2000 \
+	--eval-episodes 5 \
+	--save-freq 2000 \
+	--progress-bar
+
+Multiple mode:
+python train_hybridsyn_ppo.py \
+	--mode multiple \
+	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+	--circuit-pool \
+		../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+		../1_inputs/EPFL_benchmarks/arithmetic/max.aig \
+		../1_inputs/EPFL_benchmarks/arithmetic/log2.aig \
+	--sequence-steps 25 \
+	--total-actions 60000 \
+	--ppo-steps 300 \
+	--batch-size 60 \
+	--learning-rate 0.0003 \
+	--gamma 0.99 \
+	--gae-lambda 0.95 \
+	--clip-range 0.2 \
+	--ent-coef 0.01 \
+	--vf-coef 0.5 \
+	--seed 42 \
+	--device auto \
+	--reward-alpha 0.5 \
+	--reward-beta 0.5 \
+	--step-penalty 0.0 \
+	--reward-scale 50.0 \
+	--reward-clip 10.0 \
+	--log-file-name train_multiple_lutlevel.log \
+	--eval-freq 2000 \
+	--eval-episodes 3 \
+	--save-freq 2000 \
+	--progress-bar
+
+2) CONTINUE TRAINING
+
+Chu y --mode co the dung auto/single/multiple.
+
+Single mode:
+python continue_training.py \
+	--model-path ../3_outputs/adder/train_single_lutlevel/ppo_hybridsyn_final.zip \
+	--mode single \
+	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+	--additional-actions 10000 \
+	--sequence-steps 25 \
+	--reward-alpha 0.5 \
+	--reward-beta 0.5 \
+	--step-penalty 0.0 \
+	--reward-scale 50.0 \
+	--reward-clip 10.0 \
+	--seed 42 \
+	--device auto \
+	--eval-freq 2000 \
+	--eval-episodes 3 \
+	--save-freq 2000 \
+	--progress-bar \
+	--resume-log-file continue_lutlevel.log
+
+Multiple mode:
+python continue_training.py \
+	--model-path ../3_outputs/MULTIPLE_MODE/train_multiple_lutlevel/ppo_hybridsyn_final.zip \
+	--mode multiple \
+	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+	--circuit-pool \
+		../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+		../1_inputs/EPFL_benchmarks/arithmetic/max.aig \
+		../1_inputs/EPFL_benchmarks/arithmetic/log2.aig \
+	--additional-actions 20000 \
+	--sequence-steps 25 \
+	--reward-alpha 0.5 \
+	--reward-beta 0.5 \
+	--step-penalty 0.0 \
+	--reward-scale 50.0 \
+	--reward-clip 10.0 \
+	--seed 42 \
+	--device auto \
+	--eval-freq 2000 \
+	--eval-episodes 3 \
+	--save-freq 2000 \
+	--progress-bar \
+	--resume-log-file continue_lutlevel.log
+
+3) RUN TRAINED MODEL (INFERENCE)
+
+Chu y --mode co the dung auto/single/multiple.
+
+Single mode:
+python run_trained_model.py \
+	--model-path ../3_outputs/adder/train_single_lutlevel/ppo_hybridsyn_final.zip \
+	--mode single \
+	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+	--episodes 3 \
+	--sequence-steps 25 \
+	--deterministic \
+	--reward-alpha 0.5 \
+	--reward-beta 0.5 \
+	--step-penalty 0.0 \
+	--seed 42
+
+4) RESYN2 BASELINE FOR FAIR COMPARISON
+
+Rule:
+- Dung cung mot tap circuit cho ca HybridSYN va resyn2.
+- So sanh LUT6 count va LUT6 Level sau cung mot buoc mapping: if -K 6.
+- Khong so sanh AND/INV voi LUT6.
+
+Run baseline:
+python run_resyn2_baseline.py \
+	--input-glob ../1_inputs/EPFL_benchmarks/arithmetic/*.aig \
+	--abc-binary abc/abc \
+	--output-csv ../3_outputs/resyn2_baseline.csv \
+	--timeout-s 60
+
+If you want a single-circuit check:
+./abc/abc -c "source ./abc/abc.rc; read_aiger ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig; strash; resyn2; if -K 6; print_stats"
+
+Multiple mode:
+python run_trained_model.py \
+	--model-path ../3_outputs/MULTIPLE_MODE/train_multiple_lutlevel/ppo_hybridsyn_resumed_final.zip \
+	--mode multiple \
+	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+	--circuit-pool \
+		../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
+		../1_inputs/EPFL_benchmarks/arithmetic/max.aig \
+		../1_inputs/EPFL_benchmarks/arithmetic/log2.aig \
+	--episodes 9 \
+	--sequence-steps 25 \
+	--deterministic \
+	--reward-alpha 0.5 \
+	--reward-beta 0.5 \
+	--step-penalty 0.0 \
+	--seed 42
+	
