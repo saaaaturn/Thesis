@@ -1,0 +1,33 @@
+{
+  "batch_size": 60,
+  "circuit_file": "../1_inputs/EPFL_benchmarks/arithmetic/adder.aig",
+  "circuit_pool": [
+    "../1_inputs/EPFL_benchmarks/arithmetic/adder.aig",
+    "../1_inputs/EPFL_benchmarks/arithmetic/bar.aig",
+    "../1_inputs/EPFL_benchmarks/random_control/int2float.aig",
+    "../1_inputs/EPFL_benchmarks/random_control/ctrl.aig"
+  ],
+  "clip_range": 0.2,
+  "device": "cuda",
+  "ent_coef": 0.005,
+  "eval_episodes": 5,
+  "eval_freq": 2000,
+  "gae_lambda": 0.95,
+  "gamma": 0.99,
+  "learning_rate": 0.0008,
+  "log_file_name": "multiple_adder_bar_int2float_ctrl_LUT6COUNT.log",
+  "matrix_run_tag": "multiple_adder_bar_int2float_ctrl_LUT6COUNT",
+  "mode": "multiple",
+  "ppo_steps": 300,
+  "progress_bar": false,
+  "reward_alpha": 1.0,
+  "reward_beta": 0.0,
+  "reward_clip": 10.0,
+  "reward_scale": 20.0,
+  "save_freq": 2000,
+  "seed": 42,
+  "sequence_steps": 25,
+  "step_penalty": 0.0005,
+  "total_actions": 80000,
+  "vf_coef": 0.5
+}
