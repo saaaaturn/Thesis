@@ -102,6 +102,8 @@ class HybridSYNEnv(gym.Env):
         step_penalty: float = 0.001, #penalty for each step
         reward_scale: float = 50.0, #scaling factor for the reward to keep PPO updates numerically stable
         reward_clip: float = 10.0,
+        allowed_actions: list[str] | None = None,
+        enforce_clean_signal: bool = True,
        
         max_steps: int = 20,
         step_size: float = 0.03,
@@ -112,7 +114,17 @@ class HybridSYNEnv(gym.Env):
         super().__init__()
 
         self.state_dim = 320
-        self.num_actions = len(ACTION_NAMES)
+        all_action_names = list(ACTION_NAMES)
+        if allowed_actions:
+            unknown_actions = sorted(set(allowed_actions) - set(all_action_names))
+            if unknown_actions:
+                raise ValueError(f"Unsupported action names in --allowed-actions: {unknown_actions}")
+            self._enabled_action_names = [name for name in all_action_names if name in set(allowed_actions)]
+            if not self._enabled_action_names:
+                raise ValueError("allowed_actions resulted in an empty action set")
+        else:
+            self._enabled_action_names = all_action_names
+        self.num_actions = len(self._enabled_action_names)
         self.max_steps = max_steps
         self.step_size = step_size
         self.transition_noise_std = transition_noise_std
@@ -127,6 +139,7 @@ class HybridSYNEnv(gym.Env):
         self.step_penalty = step_penalty
         self.reward_scale = reward_scale
         self.reward_clip = reward_clip
+        self.enforce_clean_signal = enforce_clean_signal
         self.matrix_run_tag = matrix_run_tag
 
         self.action_space = spaces.Discrete(self.num_actions)
@@ -454,8 +467,7 @@ class HybridSYNEnv(gym.Env):
             return self._current_state_file
         return self._process_dir / "state_320d.txt"
 
-    def _run_abc_action(self, action: int) -> Dict[str, Any]:
-        action_name = ACTION_NAMES[action]
+    def _run_abc_action(self, action_name: str) -> Dict[str, Any]:
 
         if not self.enable_real_action_execution:
             return {
@@ -524,8 +536,7 @@ class HybridSYNEnv(gym.Env):
             "stderr_tail": proc.stderr[-500:] if proc.stderr else "",
         }
 
-    def _run_mig_action(self, action: int) -> Dict[str, Any]:
-        action_name = ACTION_NAMES[action]
+    def _run_mig_action(self, action_name: str) -> Dict[str, Any]:
 
         if not self.enable_real_action_execution:
             return {
@@ -641,7 +652,7 @@ class HybridSYNEnv(gym.Env):
 
         info = {
             "score": self._score_state(self._state),
-            "action_names": ACTION_NAMES,
+            "action_names": self._enabled_action_names,
             "circuit": str(self._current_circuit),
             "base_circuit": str(self._active_base_circuit),
             "mode": self.mode,
@@ -659,13 +670,14 @@ class HybridSYNEnv(gym.Env):
         state_file_before = str(self._current_state_file)
         prev_metrics = self._get_abc_metrics(self._current_circuit)
 
-        action_name = ACTION_NAMES[action]
+        action_name = self._enabled_action_names[action]
         if action_name in MIG_ACTION_NAMES:
-            exec_info = self._run_mig_action(action)
+            exec_info = self._run_mig_action(action_name)
         else:
-            exec_info = self._run_abc_action(action)
+            exec_info = self._run_abc_action(action_name)
 
         reencode_info: Optional[Dict[str, Any]] = None
+        clean_signal_breach = False
         if exec_info.get("success") and self.enable_real_state_reencode:
             reencode_info = self._reencode_state_from_circuit(self._current_circuit, step_index=self._step_count + 1)
             if reencode_info.get("success"):
@@ -673,13 +685,25 @@ class HybridSYNEnv(gym.Env):
                 self._current_state_file = Path(reencode_info["state_file"])
                 next_score = self._score_state(next_state)
             else:
+                clean_signal_breach = True
+                if self.enforce_clean_signal:
+                    next_state = self._state.copy()
+                    next_score = self._score_state(next_state)
+                else:
+                    next_state = self._apply_action(self._state, action)
+                    next_score = self._score_state(next_state)
+        else:
+            clean_signal_breach = True
+            if self.enforce_clean_signal:
+                next_state = self._state.copy()
+                next_score = self._score_state(next_state)
+            else:
                 next_state = self._apply_action(self._state, action)
                 next_score = self._score_state(next_state)
-        else:
-            next_state = self._apply_action(self._state, action)
-            next_score = self._score_state(next_state)
 
         next_metrics = self._get_abc_metrics(self._current_circuit)
+        if not next_metrics.get("success"):
+            clean_signal_breach = True
 
         # Calculate QoR using unified LUT6/Level formula: alpha * ((lut_init - lut_t) / lut_init) + beta * ((lev_init - lev_t) / lev_init)
         next_lut6 = next_metrics.get("lut6_count")
@@ -698,7 +722,10 @@ class HybridSYNEnv(gym.Env):
             qor = float((next_score - prev_score))
 
         # Reward is QoR minus optional step penalty
+        # Reward is QoR minus optional step penalty.
         reward_raw = float(qor - self.step_penalty)
+        if clean_signal_breach and self.enforce_clean_signal:
+            reward_raw = min(reward_raw, -0.01)
 
         # Normalize and clip reward to keep PPO updates numerically stable.
         reward = reward_raw / max(self.reward_scale, 1e-8)
@@ -707,13 +734,14 @@ class HybridSYNEnv(gym.Env):
         self._state = next_state
         self._step_count += 1
 
-        terminated = False
+        terminated = bool(clean_signal_breach and self.enforce_clean_signal)
         truncated = self._step_count >= self.max_steps
 
         info = {
             "score": next_score,
             "action_id": int(action),
-            "action_name": ACTION_NAMES[action],
+            "action_name": action_name,
+            "allowed_action_names": self._enabled_action_names,
             "step": self._step_count,
             "circuit": str(self._current_circuit),
             "base_circuit": str(self._active_base_circuit),
@@ -728,6 +756,8 @@ class HybridSYNEnv(gym.Env):
             "reward_clip": self.reward_clip,
             "reward_mode": "lut6_level_relative" if (self.enable_real_qor_reward and next_lut6 is not None and next_lev is not None) else "surrogate",
             "state_reencode": reencode_info,
+            "clean_signal_breach": clean_signal_breach,
+            "clean_signal_enforced": self.enforce_clean_signal,
             "state_file_before": state_file_before,
             "state_file": str(self._current_state_file),
             "lut_init": self.lut_init,

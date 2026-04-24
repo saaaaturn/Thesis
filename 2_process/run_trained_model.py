@@ -115,11 +115,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--matrix-run-tag", type=str, default="", help="Override tag for matrix/320D outputs")
     parser.add_argument("--output-dir", type=str, default="", help="Directory to save inference logs and trace")
-    parser.add_argument("--reward-alpha", type=float, default=None, help="Override reward alpha (LUT6 weight); defaults to training run value (0.5)")
-    parser.add_argument("--reward-beta", type=float, default=None, help="Override reward beta (Level weight); defaults to training run value (0.5)")
+    parser.add_argument("--reward-alpha", type=float, default=None, help="Override reward alpha (LUT6 weight); defaults to training run value (1.0)")
+    parser.add_argument("--reward-beta", type=float, default=None, help="Override reward beta (Level weight); defaults to training run value (0.0)")
     parser.add_argument("--step-penalty", type=float, default=None, help="Override step penalty; defaults to training run value (0.0)")
     parser.add_argument("--reward-scale", type=float, default=None, help="Override reward scale; defaults to training run value")
     parser.add_argument("--reward-clip", type=float, default=None, help="Override reward clip; defaults to training run value")
+    parser.add_argument("--allowed-actions", nargs="+", default=[])
+    parser.add_argument(
+        "--enforce-clean-signal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Terminate sequence and penalize when action execution/re-encode pipeline fails.",
+    )
     return parser.parse_args()
 
 
@@ -147,10 +154,11 @@ def main() -> None:
         mode = args.mode
 
     reward_alpha = args.reward_alpha if args.reward_alpha is not None else float(run_args.get("reward_alpha", 1.0))
-    reward_beta = args.reward_beta if args.reward_beta is not None else float(run_args.get("reward_beta", 0.1))
-    step_penalty = args.step_penalty if args.step_penalty is not None else float(run_args.get("step_penalty", 0.001))
-    reward_scale = args.reward_scale if args.reward_scale is not None else float(run_args.get("reward_scale", 50.0))
+    reward_beta = args.reward_beta if args.reward_beta is not None else float(run_args.get("reward_beta", 0.0))
+    step_penalty = args.step_penalty if args.step_penalty is not None else float(run_args.get("step_penalty", 0.0))
+    reward_scale = args.reward_scale if args.reward_scale is not None else float(run_args.get("reward_scale", 10.0))
     reward_clip = args.reward_clip if args.reward_clip is not None else float(run_args.get("reward_clip", 10.0))
+    allowed_actions = args.allowed_actions or run_args.get("allowed_actions", []) or []
 
     if mode == "multiple":
         pool_values = args.circuit_pool or run_args.get("circuit_pool", []) or []
@@ -209,6 +217,8 @@ def main() -> None:
                 step_penalty=step_penalty,
                 reward_scale=reward_scale,
                 reward_clip=reward_clip,
+                allowed_actions=allowed_actions,
+                enforce_clean_signal=args.enforce_clean_signal,
             )
         )
         model = PPO.load(str(model_path), env=env, device=args.device)

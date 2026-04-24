@@ -14,7 +14,7 @@ import json
 import math
 from pathlib import Path
 import sys
-from typing import TextIO
+from typing import Any, TextIO
 
 import gymnasium as gym
 import numpy as np
@@ -100,6 +100,12 @@ class TrainingProgressCallback(BaseCallback):
         self.current_iteration_qors: list[float] = []
         self.current_iteration_lut6_counts: list[float] = []
         self.current_iteration_lut6_levels: list[float] = []
+        self.action_lut6_deltas: dict[str, list[float]] = {}
+        self.total_action_exec = 0
+        self.total_action_exec_fail = 0
+        self.total_reencode_attempt = 0
+        self.total_reencode_fail = 0
+        self.total_clean_signal_breach = 0
 
     @staticmethod
     def _format_qor(value: object) -> str:
@@ -191,6 +197,27 @@ class TrainingProgressCallback(BaseCallback):
         if lut6_lev_float is not None:
             self.current_iteration_lut6_levels.append(lut6_lev_float)
             self.logger.record("lut6_level/current", lut6_lev_float)
+
+        prev_lut6_float = self._to_float_or_none(previous_metrics.get("lut6_count"))
+        if prev_lut6_float is not None and lut6_count_float is not None:
+            # Positive delta means action reduced LUT6 count.
+            lut6_delta = prev_lut6_float - lut6_count_float
+            self.action_lut6_deltas.setdefault(action_name, []).append(lut6_delta)
+
+        action_exec = info.get("action_exec") or {}
+        if action_exec.get("executed"):
+            self.total_action_exec += 1
+            if not action_exec.get("success"):
+                self.total_action_exec_fail += 1
+
+        state_reencode = info.get("state_reencode")
+        if state_reencode is not None:
+            self.total_reencode_attempt += 1
+            if not state_reencode.get("success"):
+                self.total_reencode_fail += 1
+
+        if info.get("clean_signal_breach"):
+            self.total_clean_signal_breach += 1
 
         if step_index == 1 or self.current_sequence_id is None:
             self.sequence_index += 1
@@ -364,8 +391,145 @@ class TrainingProgressCallback(BaseCallback):
                     f"Best-sequence LUT6 Level: {self._format_qor(iteration_best_sequence_record.get('best_lut6_lev'))}"
                 )
 
+        if self.action_lut6_deltas:
+            action_avg_deltas: list[tuple[str, float]] = []
+            for action_name, deltas in self.action_lut6_deltas.items():
+                if deltas:
+                    action_avg_deltas.append((action_name, sum(deltas) / len(deltas)))
+            action_avg_deltas.sort(key=lambda item: item[1], reverse=True)
+            top_actions = action_avg_deltas[:3]
+            bottom_actions = action_avg_deltas[-3:]
+            if top_actions:
+                print("Top LUT6-reducing actions this run:")
+                for action_name, avg_delta in top_actions:
+                    print(f"  {action_name}: avg LUT6 delta {avg_delta:+.4f}")
+            if bottom_actions:
+                print("Most LUT6-harmful actions this run:")
+                for action_name, avg_delta in bottom_actions:
+                    print(f"  {action_name}: avg LUT6 delta {avg_delta:+.4f}")
+
+        if self.total_action_exec > 0:
+            exec_fail_rate = self.total_action_exec_fail / self.total_action_exec
+            self.logger.record("pipeline/action_exec_fail_rate", exec_fail_rate)
+            print(
+                f"Pipeline action execution: {self.total_action_exec_fail}/{self.total_action_exec} failed "
+                f"({exec_fail_rate:.2%})"
+            )
+
+        if self.total_reencode_attempt > 0:
+            reencode_fail_rate = self.total_reencode_fail / self.total_reencode_attempt
+            self.logger.record("pipeline/reencode_fail_rate", reencode_fail_rate)
+            print(
+                f"Pipeline state re-encode: {self.total_reencode_fail}/{self.total_reencode_attempt} failed "
+                f"({reencode_fail_rate:.2%})"
+            )
+
+        self.logger.record("pipeline/clean_signal_breach_total", self.total_clean_signal_breach)
+        print(f"Clean-signal breaches observed: {self.total_clean_signal_breach}")
+
     def _on_training_end(self) -> None:
         print("=== HybridSYN PPO training end ===")
+
+
+class LUT6EvalCallback(BaseCallback):
+    """Evaluate by final LUT6 and save best checkpoint by lowest mean LUT6."""
+
+    def __init__(
+        self,
+        eval_env: gym.Env,
+        save_dir: Path,
+        eval_freq: int = 5000,
+        n_eval_episodes: int = 5,
+        deterministic: bool = True,
+        seed: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.eval_env = eval_env
+        self.save_dir = save_dir
+        self.eval_freq = max(1, int(eval_freq))
+        self.n_eval_episodes = max(1, int(n_eval_episodes))
+        self.deterministic = deterministic
+        self.seed = seed
+        self.best_mean_lut6 = float("inf")
+        self.best_mean_lut6_level = float("inf")
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _safe_float(value: object) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _evaluate_once(self) -> tuple[float | None, float | None, int]:
+        lut6_values: list[float] = []
+        lut6_level_values: list[float] = []
+
+        for ep in range(self.n_eval_episodes):
+            eval_seed = None if self.seed is None else (self.seed + self.n_calls + ep)
+            obs, info = self.eval_env.reset(seed=eval_seed)
+            done = False
+            final_info: dict[str, Any] = {}
+
+            while not done:
+                action, _ = self.model.predict(obs, deterministic=self.deterministic)
+                obs, _reward, terminated, truncated, step_info = self.eval_env.step(int(action))
+                final_info = step_info
+                done = bool(terminated or truncated)
+
+            metrics = (final_info.get("metrics_next") if final_info else None) or (info.get("metrics") or {})
+            lut6_val = self._safe_float(metrics.get("lut6_count"))
+            lut6_level_val = self._safe_float(metrics.get("lut6_lev"))
+            if lut6_val is not None:
+                lut6_values.append(lut6_val)
+            if lut6_level_val is not None:
+                lut6_level_values.append(lut6_level_val)
+
+        mean_lut6 = (sum(lut6_values) / len(lut6_values)) if lut6_values else None
+        mean_lut6_level = (sum(lut6_level_values) / len(lut6_level_values)) if lut6_level_values else None
+        return mean_lut6, mean_lut6_level, len(lut6_values)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.eval_freq != 0:
+            return True
+
+        mean_lut6, mean_lut6_level, valid_count = self._evaluate_once()
+        if mean_lut6 is not None:
+            self.logger.record("eval_lut6/mean", mean_lut6)
+        if mean_lut6_level is not None:
+            self.logger.record("eval_lut6_level/mean", mean_lut6_level)
+        self.logger.record("eval_lut6/valid_episodes", valid_count)
+
+        print(
+            f"[LUT6 Eval @ step {self.n_calls}] mean LUT6={mean_lut6} "
+            f"mean LUT6_Level={mean_lut6_level} valid={valid_count}/{self.n_eval_episodes}"
+        )
+
+        if mean_lut6 is None:
+            return True
+
+        if mean_lut6 < self.best_mean_lut6:
+            self.best_mean_lut6 = mean_lut6
+            if mean_lut6_level is not None:
+                self.best_mean_lut6_level = mean_lut6_level
+            model_path = self.save_dir / "best_lut6_model"
+            self.model.save(str(model_path))
+            meta_path = self.save_dir / "best_lut6_meta.json"
+            meta_payload = {
+                "step": self.n_calls,
+                "best_mean_lut6": self.best_mean_lut6,
+                "best_mean_lut6_level": self.best_mean_lut6_level,
+                "n_eval_episodes": self.n_eval_episodes,
+            }
+            meta_path.write_text(json.dumps(meta_payload, indent=2), encoding="utf-8")
+            print(
+                f"[LUT6 Eval] New best checkpoint saved: {model_path}.zip "
+                f"(mean LUT6={self.best_mean_lut6:.4f})"
+            )
+
+        return True
 
 
 class MultiModePerCircuitEvalCallback(BaseCallback):
@@ -383,6 +547,8 @@ class MultiModePerCircuitEvalCallback(BaseCallback):
         step_penalty: float,
         reward_scale: float,
         reward_clip: float,
+        allowed_actions: list[str],
+        enforce_clean_signal: bool,
         eval_freq: int = 5000,
         n_episodes: int = 1
     ) -> None:
@@ -397,6 +563,8 @@ class MultiModePerCircuitEvalCallback(BaseCallback):
         self.step_penalty = step_penalty
         self.reward_scale = reward_scale
         self.reward_clip = reward_clip
+        self.allowed_actions = allowed_actions
+        self.enforce_clean_signal = enforce_clean_signal
         self.eval_freq = eval_freq
         self.n_episodes = n_episodes
         self.n_calls = 0
@@ -426,6 +594,8 @@ class MultiModePerCircuitEvalCallback(BaseCallback):
                     step_penalty=self.step_penalty,
                     reward_scale=self.reward_scale,
                     reward_clip=self.reward_clip,
+                    allowed_actions=self.allowed_actions,
+                    enforce_clean_signal=self.enforce_clean_signal,
                 )
                 
                 obs, info = eval_env.reset()
@@ -486,6 +656,9 @@ def print_run_configuration(args: argparse.Namespace, log_dir: Path, model_dir: 
         "step_penalty",
         "reward_scale",
         "reward_clip",
+        "allowed_actions",
+        "enforce_clean_signal",
+        "best_by",
         "log_file_name",
         "matrix_run_tag",
         "eval_freq",
@@ -513,6 +686,8 @@ def make_env(
     step_penalty: float,
     reward_scale: float,
     reward_clip: float,
+    allowed_actions: list[str],
+    enforce_clean_signal: bool,
 ) -> gym.Env:
     env = HybridSYNEnv(
         circuit_file=str(circuit_file),
@@ -526,6 +701,8 @@ def make_env(
         step_penalty=step_penalty,
         reward_scale=reward_scale,
         reward_clip=reward_clip,
+        allowed_actions=allowed_actions,
+        enforce_clean_signal=enforce_clean_signal,
     )
     return Monitor(env)
 
@@ -561,19 +738,37 @@ def parse_args() -> argparse.Namespace:
         help="Actions collected before each PPO update.",
     )
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-range", type=float, default=0.2)
-    parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--ent-coef", type=float, default=0.003)
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto", help="auto, cpu, or cuda")
-    parser.add_argument("--reward-alpha", type=float, default=0.5, help="LUT6 weight in QoR formula (default 0.5)")
-    parser.add_argument("--reward-beta", type=float, default=0.5, help="Level weight in QoR formula (default 0.5)")
+    parser.add_argument("--reward-alpha", type=float, default=1.0, help="LUT6 weight in QoR formula (default 1.0)")
+    parser.add_argument("--reward-beta", type=float, default=0.0, help="Level weight in QoR formula (default 0.0)")
     parser.add_argument("--step-penalty", type=float, default=0.0, help="Penalty per step (default 0.0)")
-    parser.add_argument("--reward-scale", type=float, default=50.0, help="Reward scaling factor for numerical stability (default 50.0)")
+    parser.add_argument("--reward-scale", type=float, default=10.0, help="Reward scaling factor for numerical stability (default 10.0)")
     parser.add_argument("--reward-clip", type=float, default=10.0, help="Reward clipping range (default 10.0)")
+    parser.add_argument(
+        "--allowed-actions",
+        nargs="+",
+        default=[],
+        help="Optional subset of action names to enable; useful for pruning harmful actions.",
+    )
+    parser.add_argument(
+        "--enforce-clean-signal",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Terminate sequence and penalize when action execution/re-encode pipeline fails.",
+    )
+    parser.add_argument(
+        "--best-by",
+        choices=["lut6", "reward", "both"],
+        default="lut6",
+        help="Criterion for saving best checkpoint(s).",
+    )
     parser.add_argument("--log-file-name", type=str, default="train.log")
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--eval-episodes", type=int, default=5)
@@ -629,6 +824,7 @@ def main() -> None:
 
     train_env = None
     eval_env = None
+    lut6_eval_env = None
     try:
         train_env = make_env(
             circuit_file,
@@ -642,6 +838,8 @@ def main() -> None:
             args.step_penalty,
             args.reward_scale,
             args.reward_clip,
+            args.allowed_actions,
+            args.enforce_clean_signal,
         )
         eval_env = make_env(
             circuit_file,
@@ -655,6 +853,23 @@ def main() -> None:
             args.step_penalty,
             args.reward_scale,
             args.reward_clip,
+            args.allowed_actions,
+            args.enforce_clean_signal,
+        )
+        lut6_eval_env = make_env(
+            circuit_file,
+            args.mode,
+            circuit_pool,
+            run_name,
+            args.sequence_steps,
+            args.seed + 2,
+            args.reward_alpha,
+            args.reward_beta,
+            args.step_penalty,
+            args.reward_scale,
+            args.reward_clip,
+            args.allowed_actions,
+            args.enforce_clean_signal,
         )
 
         policy_kwargs = dict(
@@ -691,6 +906,14 @@ def main() -> None:
             n_eval_episodes=args.eval_episodes,
             deterministic=True,
         )
+        lut6_eval_callback = LUT6EvalCallback(
+            eval_env=lut6_eval_env,
+            save_dir=model_dir / "best_lut6",
+            eval_freq=args.eval_freq,
+            n_eval_episodes=args.eval_episodes,
+            deterministic=True,
+            seed=args.seed + 2,
+        )
 
         checkpoint_callback = CheckpointCallback(
             save_freq=args.save_freq,
@@ -706,7 +929,9 @@ def main() -> None:
         )
 
         # Multi-mode per-circuit evaluation callback
-        callbacks_list = [eval_callback, checkpoint_callback, training_progress_callback]
+        callbacks_list: list[BaseCallback] = [checkpoint_callback, training_progress_callback, lut6_eval_callback]
+        if args.best_by in {"reward", "both"}:
+            callbacks_list.insert(0, eval_callback)
         if args.mode == "multiple" and circuit_pool:
             multimode_eval_callback = MultiModePerCircuitEvalCallback(
                 circuit_pool=circuit_pool,
@@ -719,6 +944,8 @@ def main() -> None:
                 step_penalty=args.step_penalty,
                 reward_scale=args.reward_scale,
                 reward_clip=args.reward_clip,
+                allowed_actions=args.allowed_actions,
+                enforce_clean_signal=args.enforce_clean_signal,
                 eval_freq=args.eval_freq,
                 n_episodes=1,
             )
@@ -739,6 +966,8 @@ def main() -> None:
             train_env.close()
         if eval_env is not None:
             eval_env.close()
+        if lut6_eval_env is not None:
+            lut6_eval_env.close()
         sys.stdout = orig_stdout
         sys.stderr = orig_stderr
         log_file.close()

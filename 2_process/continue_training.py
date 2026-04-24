@@ -17,12 +17,12 @@ import sys
 from typing import TextIO
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 
 from hybridsyn_env import HybridSYNEnv
-from train_hybridsyn_ppo import TrainingProgressCallback
+from train_hybridsyn_ppo import LUT6EvalCallback, TrainingProgressCallback
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -99,6 +99,8 @@ def make_env(
 	step_penalty: float,
 	reward_scale: float,
 	reward_clip: float,
+	allowed_actions: list[str],
+	enforce_clean_signal: bool,
 ):
 	env = HybridSYNEnv(
 		circuit_file=str(circuit_file),
@@ -112,6 +114,8 @@ def make_env(
 		step_penalty=step_penalty,
 		reward_scale=reward_scale,
 		reward_clip=reward_clip,
+		allowed_actions=allowed_actions,
+		enforce_clean_signal=enforce_clean_signal,
 	)
 	return Monitor(env)
 
@@ -131,11 +135,18 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--resume-log-file", type=str, default="", help="Log filename to append/create in run-dir")
 	parser.add_argument("--output-model-name", type=str, default="ppo_hybridsyn_resumed_final")
 
-	parser.add_argument("--reward-alpha", type=float, default=0.5, help="LUT6 weight in QoR formula (default 0.5)")
-	parser.add_argument("--reward-beta", type=float, default=0.5, help="Level weight in QoR formula (default 0.5)")
+	parser.add_argument("--reward-alpha", type=float, default=1.0, help="LUT6 weight in QoR formula (default 1.0)")
+	parser.add_argument("--reward-beta", type=float, default=0.0, help="Level weight in QoR formula (default 0.0)")
 	parser.add_argument("--step-penalty", type=float, default=0.0, help="Penalty per step (default 0.0)")
-	parser.add_argument("--reward-scale", type=float, default=50.0, help="Reward scaling factor for numerical stability (default 50.0)")
+	parser.add_argument("--reward-scale", type=float, default=10.0, help="Reward scaling factor for numerical stability (default 10.0)")
 	parser.add_argument("--reward-clip", type=float, default=10.0, help="Reward clipping range (default 10.0)")
+	parser.add_argument("--allowed-actions", nargs="+", default=[])
+	parser.add_argument(
+		"--enforce-clean-signal",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Terminate sequence and penalize when action execution/re-encode pipeline fails.",
+	)
 
 	parser.add_argument("--eval-freq", type=int, default=5000)
 	parser.add_argument("--eval-episodes", type=int, default=5)
@@ -162,6 +173,7 @@ def main() -> None:
 		mode = str(run_args.get("mode", "single"))
 	else:
 		mode = args.mode
+	allowed_actions = args.allowed_actions or run_args.get("allowed_actions", []) or []
 
 	matrix_run_tag = args.matrix_run_tag or run_dir.name
 	checkpoint_dir = run_dir / "checkpoints"
@@ -194,6 +206,7 @@ def main() -> None:
 
 	train_env = None
 	eval_env = None
+	lut6_eval_env = None
 	try:
 		print("=== Resume training begin ===")
 		print(f"Model loaded from: {model_path}")
@@ -218,6 +231,8 @@ def main() -> None:
 			step_penalty=args.step_penalty,
 			reward_scale=args.reward_scale,
 			reward_clip=args.reward_clip,
+			allowed_actions=allowed_actions,
+			enforce_clean_signal=args.enforce_clean_signal,
 		)
 		eval_env = make_env(
 			circuit_file=circuit_file,
@@ -231,18 +246,35 @@ def main() -> None:
 			step_penalty=args.step_penalty,
 			reward_scale=args.reward_scale,
 			reward_clip=args.reward_clip,
+			allowed_actions=allowed_actions,
+			enforce_clean_signal=args.enforce_clean_signal,
+		)
+		lut6_eval_env = make_env(
+			circuit_file=circuit_file,
+			mode=mode,
+			circuit_pool=circuit_pool,
+			matrix_run_tag=matrix_run_tag,
+			max_steps=args.sequence_steps,
+			seed=args.seed + 2,
+			reward_alpha=args.reward_alpha,
+			reward_beta=args.reward_beta,
+			step_penalty=args.step_penalty,
+			reward_scale=args.reward_scale,
+			reward_clip=args.reward_clip,
+			allowed_actions=allowed_actions,
+			enforce_clean_signal=args.enforce_clean_signal,
 		)
 
 		model = PPO.load(str(model_path), env=train_env, device=args.device)
 		model.set_logger(configure(str(run_dir), ["stdout", "tensorboard"]))
 
-		eval_callback = EvalCallback(
-			eval_env,
-			best_model_save_path=str(best_dir),
-			log_path=str(eval_dir),
+		lut6_eval_callback = LUT6EvalCallback(
+			eval_env=lut6_eval_env,
+			save_dir=run_dir / "best_lut6",
 			eval_freq=max(1, args.eval_freq),
 			n_eval_episodes=args.eval_episodes,
 			deterministic=True,
+			seed=args.seed + 2,
 		)
 		checkpoint_callback = CheckpointCallback(
 			save_freq=max(1, args.save_freq),
@@ -259,7 +291,7 @@ def main() -> None:
 		model.learn(
 			total_timesteps=args.additional_actions,
 			reset_num_timesteps=False,
-			callback=CallbackList([eval_callback, checkpoint_callback, progress_callback]),
+			callback=CallbackList([lut6_eval_callback, checkpoint_callback, progress_callback]),
 			progress_bar=args.progress_bar,
 		)
 
@@ -272,6 +304,8 @@ def main() -> None:
 			train_env.close()
 		if eval_env is not None:
 			eval_env.close()
+		if lut6_eval_env is not None:
+			lut6_eval_env.close()
 		sys.stdout = orig_stdout
 		sys.stderr = orig_stderr
 		log_file.close()

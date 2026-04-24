@@ -1,9 +1,12 @@
+# Markdown
 NOTE KHI CHAY SCRIPT
 
 Quy uoc nhanh:
 - Single mode: dung --circuit-file, KHONG can --circuit-pool.
 - Multiple mode: dung --circuit-file + --circuit-pool.
-- Reward moi theo LUT6/Level: uu tien --step-penalty 0.0.
+- Khong con preset; nhap truc tiep cac tham so reward, penalty, scale, lr, ent_coef.
+- Muc tieu chinh LUT6-only: dung --reward-alpha 1.0 --reward-beta 0.0.
+- Best checkpoint theo LUT6: dung --best-by lut6.
 
 1) TRAINING TU DAU
 
@@ -25,9 +28,11 @@ python train_hybridsyn_ppo.py \
 	--device auto \
 	--reward-alpha 1.0 \
 	--reward-beta 0.0 \
-	--step-penalty 0.0005 \
-	--reward-scale 20.0 \
+	--step-penalty 0.0 \
+	--reward-scale 10.0 \
 	--reward-clip 10.0 \
+	--best-by lut6 \
+	--enforce-clean-signal \
 	--log-file-name train_single_lutlevel.log \
 	--eval-freq 2000 \
 	--eval-episodes 5 \
@@ -54,11 +59,13 @@ python train_hybridsyn_ppo.py \
 	--vf-coef 0.5 \
 	--seed 42 \
 	--device auto \
-	--reward-alpha 0.5 \
-	--reward-beta 0.5 \
+	--reward-alpha 1.0 \
+	--reward-beta 0.0 \
 	--step-penalty 0.0 \
-	--reward-scale 50.0 \
+	--reward-scale 10.0 \
 	--reward-clip 10.0 \
+	--best-by lut6 \
+	--enforce-clean-signal \
 	--log-file-name train_multiple_lutlevel.log \
 	--eval-freq 2000 \
 	--eval-episodes 3 \
@@ -76,11 +83,12 @@ python continue_training.py \
 	--circuit-file ../1_inputs/EPFL_benchmarks/arithmetic/adder.aig \
 	--additional-actions 10000 \
 	--sequence-steps 25 \
-	--reward-alpha 0.5 \
-	--reward-beta 0.5 \
+	--reward-alpha 1.0 \
+	--reward-beta 0.0 \
 	--step-penalty 0.0 \
-	--reward-scale 50.0 \
+	--reward-scale 10.0 \
 	--reward-clip 10.0 \
+	--enforce-clean-signal \
 	--seed 42 \
 	--device auto \
 	--eval-freq 2000 \
@@ -100,11 +108,12 @@ python continue_training.py \
 		../1_inputs/EPFL_benchmarks/arithmetic/log2.aig \
 	--additional-actions 20000 \
 	--sequence-steps 25 \
-	--reward-alpha 0.5 \
-	--reward-beta 0.5 \
+	--reward-alpha 1.0 \
+	--reward-beta 0.0 \
 	--step-penalty 0.0 \
-	--reward-scale 50.0 \
+	--reward-scale 10.0 \
 	--reward-clip 10.0 \
+	--enforce-clean-signal \
 	--seed 42 \
 	--device auto \
 	--eval-freq 2000 \
@@ -125,9 +134,11 @@ python run_trained_model.py \
 	--episodes 3 \
 	--sequence-steps 25 \
 	--deterministic \
-	--reward-alpha 0.5 \
-	--reward-beta 0.5 \
+	--reward-alpha 1.0 \
+	--reward-beta 0.0 \
 	--step-penalty 0.0 \
+	--reward-scale 10.0 \
+	--enforce-clean-signal \
 	--seed 42
 
 4) RESYN2 BASELINE FOR FAIR COMPARISON
@@ -159,8 +170,10 @@ python run_trained_model.py \
 	--episodes 9 \
 	--sequence-steps 25 \
 	--deterministic \
-	--reward-alpha 0.5 \
-	--reward-beta 0.5 \
+	--reward-alpha 1.0 \
+	--reward-beta 0.0 \
 	--step-penalty 0.0 \
+	--reward-scale 10.0 \
+	--enforce-clean-signal \
 	--seed 42
 	

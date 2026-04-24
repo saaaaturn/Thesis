@@ -1,0 +1,19 @@
+# Markdown
+1. Bám theo cấu trúc của bài mà học
+2. cái đó là gì
+3. vì sao làm
+4. giúp được gì
+5. sao không làm cái khác
+6. ý nghĩa là gì
+7. ngoài đó ra còn gì
+8. cách hoạt động ra sao
+9. flow
+10. công thức
+11. nếu không làm thì sao? nếu tăng nếu giảm, nếu thay đổi các thứ thì chuyện gì xảy ra? vì sao?
+12. Kiến thức/Công đoạn này tương tác thế nào với các block trước và sau nó?
+13. Để đạt được lợi ích này, hệ thống phải trả giá bằng tài nguyên gì?
+14. Làm sao để tôi biết thành phần này đang hoạt động sai? Dấu hiệu nhận biết là gì và cách debug ra sao?
+15. Trong thực tế sản xuất tại các công ty lớn, người ta có đang dùng phương pháp này không, hay đã có tiêu chuẩn khác?
+16. Giới hạn của phương pháp này là gì? Liệu nó có hoạt động nếu quy mô dữ liệu hoặc kích thước bài toán tăng lên gấp 100 hoặc 1000 lần không?
+17. Phương pháp này xử lý các trường hợp ngoại lệ (corner cases) hoặc dữ liệu đầu vào bị nhiễu/lỗi như thế nào?
+18. Lý thuyết hoặc thuật toán này được xây dựng dựa trên những giả định (assumptions) cốt lõi nào? Chuyện gì xảy ra nếu các giả định đó không còn đúng thực tế?

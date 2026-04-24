@@ -30,28 +30,138 @@ import torch.nn as nn
 #/////////////////////////////////////GCN + FUSION //////////////////////////////
 #////////////////////////////////////////////////////////////////////////////////
 
-#Functions to load node features.
-def load_node_features(path: Path) -> torch.Tensor:
-    """Load node features from text file, returning tensor [N, 2]: [gate_type, fanin_count]."""
+#Functions to compute derived topological properties from adjacency.
+def compute_topological_levels(num_nodes: int, edge_index: torch.Tensor, gate_types: list) -> torch.Tensor:
+    """Compute topological level (distance from PIs) for each node.
+    
+    PIs (gate_type=0) have level 0. Other nodes have level = max(fanin_levels) + 1.
+    Returns [N] tensor with topological level for each node.
+    """
+    levels = torch.full((num_nodes,), float('inf'), dtype=torch.float32)
+    source = edge_index[0]
+    target = edge_index[1]
+    
+    # Mark PIs (gate_type 0) as level 0.
+    for i, gt in enumerate(gate_types):
+        if gt == 0:
+            levels[i] = 0.0
+    
+    # Iteratively propagate levels from PIs forward.
+    changed = True
+    max_iterations = num_nodes
+    iteration = 0
+    while changed and iteration < max_iterations:
+        changed = False
+        iteration += 1
+        for i in range(target.shape[0]):
+            src, tgt = source[i].item(), target[i].item()
+            if levels[src] < float('inf'):
+                new_level = levels[src] + 1.0
+                if new_level < levels[tgt]:
+                    levels[tgt] = new_level
+                    changed = True
+    
+    # Clamp infinite levels to a large value.
+    levels = torch.clamp(levels, max=float(num_nodes))
+    return levels
+
+def compute_fanout_counts(num_nodes: int, edge_index: torch.Tensor) -> torch.Tensor:
+    """Compute fanout (number of outgoing edges) for each node.
+    
+    Returns [N] tensor with fanout count for each node.
+    """
+    source = edge_index[0]
+    fanout = torch.zeros(num_nodes, dtype=torch.float32)
+    fanout.index_add_(0, source, torch.ones_like(source, dtype=torch.float32))
+    return fanout
+
+def compute_centrality(num_nodes: int, edge_index: torch.Tensor) -> torch.Tensor:
+    """Compute node centrality as (fanin + fanout) / max_degree.
+    
+    Returns [N] normalized tensor [0, 1].
+    """
+    source = edge_index[0]
+    target = edge_index[1]
+    
+    fanin = torch.zeros(num_nodes, dtype=torch.float32)
+    fanout = torch.zeros(num_nodes, dtype=torch.float32)
+    
+    fanin.index_add_(0, target, torch.ones_like(target, dtype=torch.float32))
+    fanout.index_add_(0, source, torch.ones_like(source, dtype=torch.float32))
+    
+    degree = fanin + fanout
+    max_degree = torch.clamp(degree.max(), min=1.0)
+    centrality = degree / max_degree
+    return centrality
+
+#Functions to load node features (Phase 2: enriched 10D features).
+def load_node_features(path: Path, edge_index: torch.Tensor | None = None) -> torch.Tensor:
+    """Load node features from text file, returning enriched tensor [N, 10].
+    
+    Phase 2 features:
+      0-1: gate_type (normalized), fanin_count (normalized)
+      2-3: fanout (normalized), topological_level (normalized)
+      4: node_centrality (normalized)
+      5-9: node_type one-hot encoding (PI, PO, AND, MAJ, other) [5 dims]
+    """
     rows = []
+    gate_types = []
+    
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             node_id, gate_type, fanin_count = map(int, line.split())
-            _ = node_id  # Node id is implicit by row order after loading.
+            _ = node_id
             rows.append([float(gate_type), float(fanin_count)])
+            gate_types.append(gate_type)
 
     if not rows:
         raise ValueError(f"No node features found in {path}")
 
-    x = torch.tensor(rows, dtype=torch.float32)
-
-    # Normalize feature columns to stabilize training.
-    x[:, 0] = x[:, 0] / 2.0
-    max_fanin = torch.clamp(x[:, 1].max(), min=1.0)
-    x[:, 1] = x[:, 1] / max_fanin
+    num_nodes = len(rows)
+    x_base = torch.tensor(rows, dtype=torch.float32)
+    
+    # Normalize base features.
+    x_base[:, 0] = x_base[:, 0] / 3.0  # gate_type: assume max is 3 (PI=0, PO=1, AND=2, MAJ=3)
+    max_fanin = torch.clamp(x_base[:, 1].max(), min=1.0)
+    x_base[:, 1] = x_base[:, 1] / max_fanin
+    
+    # Compute derived features.
+    if edge_index is not None:
+        fanout = compute_fanout_counts(num_nodes, edge_index)
+        max_fanout = torch.clamp(fanout.max(), min=1.0)
+        fanout = fanout / max_fanout
+        
+        levels = compute_topological_levels(num_nodes, edge_index, gate_types)
+        max_level = torch.clamp(levels.max(), min=1.0)
+        levels = levels / max_level
+        
+        centrality = compute_centrality(num_nodes, edge_index)
+    else:
+        # Fallback if edge_index not provided (placeholder zeros).
+        fanout = torch.zeros(num_nodes, dtype=torch.float32)
+        levels = torch.zeros(num_nodes, dtype=torch.float32)
+        centrality = torch.zeros(num_nodes, dtype=torch.float32)
+    
+    # One-hot encode node type (PI=0, PO=1, AND=2, MAJ=3, other=4).
+    node_type_onehot = torch.zeros((num_nodes, 5), dtype=torch.float32)
+    for i, gt in enumerate(gate_types):
+        if 0 <= gt <= 3:
+            node_type_onehot[i, gt] = 1.0
+        else:
+            node_type_onehot[i, 4] = 1.0  # other
+    
+    # Concatenate all features: [base(2), fanout(1), levels(1), centrality(1), one_hot(5)] = 10D
+    x = torch.cat([
+        x_base,
+        fanout.unsqueeze(1),
+        levels.unsqueeze(1),
+        centrality.unsqueeze(1),
+        node_type_onehot
+    ], dim=1)
+    
     return x
 
 #Functions to load global statistics.
@@ -160,9 +270,12 @@ class GCNLayer(nn.Module):
 
 #Shared GCN encoder for AIG and MIG, producing 128D embeddings.
 class CircuitGCNEncoder(nn.Module):
-    """2-layer GCN encoder producing a fixed 128D embedding for one representation."""
+    """2-layer GCN encoder producing a fixed 128D embedding for one representation.
+    
+    Phase 2: Updated to accept 10D node features (enriched: gate_type, fanin, fanout, level, centrality, node_type_onehot(5)).
+    """
 
-    def __init__(self, in_dim: int = 2, hidden_dim: int = 64, node_dim: int = 128, out_dim: int = 128) -> None:
+    def __init__(self, in_dim: int = 10, hidden_dim: int = 64, node_dim: int = 128, out_dim: int = 128) -> None:
         super().__init__()
         self.gcn1 = GCNLayer(in_dim, hidden_dim)
         self.gcn2 = GCNLayer(hidden_dim, node_dim)
@@ -183,28 +296,42 @@ class CircuitGCNEncoder(nn.Module):
         graph_vec = torch.cat([mean_pool, max_pool], dim=0)
         return self.project(graph_vec)
 
-#Cross-attention fusion to learn dynamic weights for AIG and MIG embeddings and return fused 256D state.
-class CrossAttentionFusion(nn.Module):
-    """Learn dynamic weights for AIG and MIG embeddings and return fused 256D state."""
+#Feature-wise gated fusion for AIG and MIG embeddings (Phase 2 upgrade).
+class FeatureWiseGatedFusion(nn.Module):
+    """Phase 2: Learn a 128D feature-wise gate to dynamically blend AIG and MIG embeddings.
+    
+    Much more expressive than 2-scalar cross-attention. Allows per-feature selection between AIG/MIG.
+    """
 
     def __init__(self, embed_dim: int = 128) -> None:
         super().__init__()
-        self.scorer = nn.Sequential(
-            nn.Linear(2 * embed_dim, 64),
+        # Learn a 128D gate for each circuit.
+        self.gate_net = nn.Sequential(
+            nn.Linear(2 * embed_dim, embed_dim),
             nn.ReLU(),
-            nn.Linear(64, 2),
+            nn.Linear(embed_dim, embed_dim),
+            nn.Sigmoid(),  # gate in [0, 1]
         )
 
     def forward(self, aig_embed: torch.Tensor, mig_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            aig_embed: [128]
+            mig_embed: [128]
+        
+        Returns:
+            fused_state: [256] (concatenation of gated embeddings)
+            gate: [128] (the learned gate values for debugging/monitoring)
+        """
         joined = torch.cat([aig_embed, mig_embed], dim=0)
-        logits = self.scorer(joined)
-        weights = torch.softmax(logits, dim=0)
-
-        weighted_aig = weights[0] * aig_embed
-        weighted_mig = weights[1] * mig_embed
-
-        fused_256 = torch.cat([weighted_aig, weighted_mig], dim=0)
-        return fused_256, weights
+        gate = self.gate_net(joined)  # [128], values in [0, 1]
+        
+        # Element-wise blend: gate selects between AIG and MIG per feature.
+        gated_aig = gate * aig_embed
+        gated_mig = (1.0 - gate) * mig_embed
+        
+        fused_state = torch.cat([gated_aig, gated_mig], dim=0)
+        return fused_state, gate
 
 #Final state encoder that combines GCN fusion with stats MLP.
 class StatsMLP(nn.Module):
@@ -222,13 +349,13 @@ class StatsMLP(nn.Module):
     def forward(self, x_stats: torch.Tensor) -> torch.Tensor:
         return self.net(x_stats)
 
-#State encoder
+#State encoder (Phase 2 updated)
 class HybridSYNStateEncoder(nn.Module):
     def __init__(self, stats_dim: int = 64) -> None:
         super().__init__()
-        self.aig_encoder = CircuitGCNEncoder()
-        self.mig_encoder = CircuitGCNEncoder()
-        self.fusion = CrossAttentionFusion(embed_dim=128)
+        self.aig_encoder = CircuitGCNEncoder(in_dim=10)
+        self.mig_encoder = CircuitGCNEncoder(in_dim=10)
+        self.fusion = FeatureWiseGatedFusion(embed_dim=128)
         self.stats_encoder = StatsMLP(in_dim=4, hidden_dim=64, out_dim=stats_dim)
 
     def forward(
@@ -241,10 +368,10 @@ class HybridSYNStateEncoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         aig_embed = self.aig_encoder(x_aig, adj_aig)
         mig_embed = self.mig_encoder(x_mig, adj_mig)
-        fused_state, weights = self.fusion(aig_embed, mig_embed)
+        fused_state, gate = self.fusion(aig_embed, mig_embed)
         stats_embed = self.stats_encoder(x_stats)
         final_state = torch.cat([fused_state, stats_embed], dim=0)
-        return aig_embed, mig_embed, fused_state, stats_embed, final_state, weights
+        return aig_embed, mig_embed, fused_state, stats_embed, final_state, gate
 
 #////////////////////////////////////////////////////////////////////////////////
 #////////////////////////////////////////MAIN FUNCTION///////////////////////////
@@ -307,11 +434,13 @@ def main() -> None:
         if not p.exists():
             raise FileNotFoundError(f"Missing input file: {p}")
 
-    x_aig = load_node_features(aig_node_path)
+    # Phase 2: Load edge indices first, then pass to load_node_features for enrichment.
     e_aig = load_edge_index(aig_edge_path)
-    x_stats = load_statistics(aig_stats_path)
-    x_mig = load_node_features(mig_node_path)
     e_mig = load_edge_index(mig_edge_path)
+    
+    x_aig = load_node_features(aig_node_path, edge_index=e_aig)
+    x_stats = load_statistics(aig_stats_path)
+    x_mig = load_node_features(mig_node_path, edge_index=e_mig)
 
     adj_aig = build_norm_adj(x_aig.shape[0], e_aig)
     adj_mig = build_norm_adj(x_mig.shape[0], e_mig)
@@ -320,19 +449,19 @@ def main() -> None:
     model.eval()
 
     with torch.no_grad():
-        aig_embed, mig_embed, fused_state, stats_embed, final_state, weights = model(
+        aig_embed, mig_embed, fused_state, stats_embed, final_state, gate = model(
             x_aig, adj_aig, x_mig, adj_mig, x_stats
         )
 
-    print("=== Stage 3/4 Forward Pass Complete ===")
+    print("=== Stage 3/4 Forward Pass Complete (Phase 2) ===")
     print(f"AIG nodes/features: {tuple(x_aig.shape)}")
     print(f"MIG nodes/features: {tuple(x_mig.shape)}")
     print(f"AIG embedding shape: {tuple(aig_embed.shape)}")
     print(f"MIG embedding shape: {tuple(mig_embed.shape)}")
-    print(f"Fused graph state shape (cross-attn): {tuple(fused_state.shape)}")
+    print(f"Fused graph state shape (feature-wise gate): {tuple(fused_state.shape)}")
     print(f"Stats embedding shape: {tuple(stats_embed.shape)}")
     print(f"Final state shape (graph + stats): {tuple(final_state.shape)}")
-    print(f"Cross-attention weights [AIG, MIG]: {weights.tolist()}")
+    print(f"Feature-wise gate mean: {gate.mean().item():.4f}, std: {gate.std().item():.4f}")
 
     gcn_results_dir = Path(args.gcn_results_dir)
     gcn_results_dir.mkdir(parents=True, exist_ok=True)
